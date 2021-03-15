@@ -51,6 +51,11 @@ public:
                              Buffer::InstancePtr buffer, MonotonicTime receive_time) PURE;
 
   /**
+   * fixfix
+   */
+  virtual void onDatagramsDropped(uint32_t dropped) PURE;
+
+  /**
    * The expected max size of the datagram to be read. If it's smaller than
    * the size of datagrams received, they will be dropped.
    */

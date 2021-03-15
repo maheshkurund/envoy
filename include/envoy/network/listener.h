@@ -279,6 +279,11 @@ public:
   virtual void onData(UdpRecvData&& data) PURE;
 
   /**
+   * fixfix
+   */
+  virtual void onDatagramsDropped(uint32_t dropped) PURE;
+
+  /**
    * Called when the underlying socket is ready for read, before onData() is
    * called. Called only once per event loop, even if followed by multiple
    * onData() calls.
