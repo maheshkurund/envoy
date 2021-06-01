@@ -193,6 +193,9 @@ public:
     return hedge_policy_;
   }
   uint32_t retryShadowBufferLimit() const override { return retry_shadow_buffer_limit_; }
+  const envoy::config::route::v3::VirtualHost& getVirtualHostConfig() const {
+    return virtual_host_config_;
+  }
 
 private:
   enum class SslRequirements { None, ExternalOnly, All };
@@ -252,6 +255,7 @@ private:
   absl::optional<envoy::config::route::v3::RetryPolicy> retry_policy_;
   absl::optional<envoy::config::route::v3::HedgePolicy> hedge_policy_;
   const CatchAllVirtualCluster virtual_cluster_catch_all_;
+  const envoy::config::route::v3::VirtualHost& virtual_host_config_;
 };
 
 using VirtualHostSharedPtr = std::shared_ptr<VirtualHostImpl>;
@@ -981,21 +985,24 @@ public:
 
   bool supportsPathlessHeaders() const override { return true; }
 };
+using VirtualHostsMapPtr = std::shared_ptr<absl::node_hash_map<std::string, VirtualHostSharedPtr>>;
 /**
  * Wraps the route configuration which matches an incoming request headers to a backend cluster.
  * This is split out mainly to help with unit testing.
  */
-class RouteMatcher {
+class RouteMatcher : Logger::Loggable<Logger::Id::router> {
 public:
   RouteMatcher(const envoy::config::route::v3::RouteConfiguration& config,
                const ConfigImpl& global_http_config,
                Server::Configuration::ServerFactoryContext& factory_context,
-               ProtobufMessage::ValidationVisitor& validator, bool validate_clusters);
+               ProtobufMessage::ValidationVisitor& validator, bool validate_clusters,
+               const VirtualHostsMapPtr& old_vhosts_map);
 
   RouteConstSharedPtr route(const RouteCallback& cb, const Http::RequestHeaderMap& headers,
                             const StreamInfo::StreamInfo& stream_info, uint64_t random_value) const;
 
   const VirtualHostImpl* findVirtualHost(const Http::RequestHeaderMap& headers) const;
+  const VirtualHostsMapPtr& getAllVirtualHosts() const { return all_virtual_hosts_; }
 
 private:
   using WildcardVirtualHosts =
@@ -1020,6 +1027,8 @@ private:
   WildcardVirtualHosts wildcard_virtual_host_prefixes_;
 
   VirtualHostSharedPtr default_virtual_host_;
+  // map of vh_name, vhostimpl
+  VirtualHostsMapPtr all_virtual_hosts_;
 };
 
 /**
@@ -1029,7 +1038,9 @@ class ConfigImpl : public Config {
 public:
   ConfigImpl(const envoy::config::route::v3::RouteConfiguration& config,
              Server::Configuration::ServerFactoryContext& factory_context,
-             ProtobufMessage::ValidationVisitor& validator, bool validate_clusters_default);
+             ProtobufMessage::ValidationVisitor& validator, bool validate_clusters_default,
+             const VirtualHostsMapPtr& old_vhosts_map=std::make_shared<
+                  absl::node_hash_map<std::string, VirtualHostSharedPtr>>());
 
   const HeaderParser& requestHeaderParser() const { return *request_headers_parser_; };
   const HeaderParser& responseHeaderParser() const { return *response_headers_parser_; };
@@ -1065,6 +1076,7 @@ public:
     return max_direct_response_body_size_bytes_;
   }
 
+  const VirtualHostsMapPtr& getVirtualHostsOld() const { return route_matcher_->getAllVirtualHosts(); }
 private:
   std::unique_ptr<RouteMatcher> route_matcher_;
   std::list<Http::LowerCaseString> internal_only_headers_;

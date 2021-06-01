@@ -1195,7 +1195,8 @@ VirtualHostImpl::VirtualHostImpl(
       include_attempt_count_in_request_(virtual_host.include_request_attempt_count()),
       include_attempt_count_in_response_(virtual_host.include_attempt_count_in_response()),
       virtual_cluster_catch_all_(*vcluster_scope_,
-                                 factory_context.routerContext().virtualClusterStatNames()) {
+                                 factory_context.routerContext().virtualClusterStatNames()),
+      virtual_host_config_(virtual_host) {
 
   switch (virtual_host.require_tls()) {
   case envoy::config::route::v3::VirtualHost::NONE:
@@ -1328,17 +1329,47 @@ const VirtualHostImpl* RouteMatcher::findWildcardVirtualHost(
 RouteMatcher::RouteMatcher(const envoy::config::route::v3::RouteConfiguration& route_config,
                            const ConfigImpl& global_route_config,
                            Server::Configuration::ServerFactoryContext& factory_context,
-                           ProtobufMessage::ValidationVisitor& validator, bool validate_clusters)
+                           ProtobufMessage::ValidationVisitor& validator, bool validate_clusters,
+                           const VirtualHostsMapPtr& old_vhosts_map)
     : vhost_scope_(factory_context.scope().scopeFromStatName(
           factory_context.routerContext().virtualClusterStatNames().vhost_)) {
+  all_virtual_hosts_ = std::make_shared<absl::node_hash_map<std::string, VirtualHostSharedPtr>>();
   absl::optional<Upstream::ClusterManager::ClusterInfoMaps> validation_clusters;
   if (validate_clusters) {
     validation_clusters = factory_context.clusterManager().clusters();
   }
+  if (!old_vhosts_map->empty()) {
+    ENVOY_LOG(warn, "Old vhosts: ");
+    for (auto itr=old_vhosts_map->begin(); itr != old_vhosts_map->end(); ++itr) {
+      ENVOY_LOG(warn, "vhost name: {}, name: {}", itr->second->getVirtualHostConfig().name(), itr->first);
+    }
+  }
   for (const auto& virtual_host_config : route_config.virtual_hosts()) {
-    VirtualHostSharedPtr virtual_host(new VirtualHostImpl(virtual_host_config, global_route_config,
+    VirtualHostSharedPtr virtual_host;
+    if (!old_vhosts_map->empty()) {
+      const auto& old_vhost_itr = old_vhosts_map->find(virtual_host_config.name());
+      if (old_vhost_itr != old_vhosts_map->end()) {
+        // vhost present in old config, calculate diff
+        auto eq = MessageUtil();
+        ENVOY_LOG(warn, "RouteMatcher: new vhost name:  {}, old vhost name: {}, name: {}", virtual_host_config.name(),
+                  old_vhost_itr->second->getVirtualHostConfig().name(), old_vhost_itr->first);
+        if ((old_vhost_itr->second != nullptr) && eq(virtual_host_config, old_vhost_itr->second->getVirtualHostConfig())) {
+          ENVOY_LOG(warn, "RouteMatcher: old vhost found");
+          virtual_host = std::move(old_vhost_itr->second);
+        }
+      }
+    }
+    if (!virtual_host) {
+      //ENVOY_LOG(warn, "RouteMatcher: old vhost not found");
+      virtual_host = std::make_shared<VirtualHostImpl>(virtual_host_config, global_route_config,
+                                                       factory_context, *vhost_scope_, validator,
+                                                       validation_clusters);
+    }
+    all_virtual_hosts_.emplace(virtual_host_config.name(), virtual_host);
+    ENVOY_LOG(warn, "RouteMatcher: added vhost entry: {}", virtual_host_config.name());
+    /*VirtualHostSharedPtr virtual_host(new VirtualHostImpl(virtual_host_config, global_route_config,
                                                           factory_context, *vhost_scope_, validator,
-                                                          validation_clusters));
+                                                          validation_clusters));*/
     for (const std::string& domain_name : virtual_host_config.domains()) {
       const std::string domain = Http::LowerCaseString(domain_name).get();
       bool duplicate_found = false;
@@ -1365,6 +1396,10 @@ RouteMatcher::RouteMatcher(const envoy::config::route::v3::RouteConfiguration& r
                                          domain, route_config.name()));
       }
     }
+  }
+  ENVOY_LOG(warn, "Updated vhosts: ");
+  for (const auto& itr1 : all_virtual_hosts_) {
+    ENVOY_LOG(warn, "vhost name: {}, name: {}", itr1.second->getVirtualHostConfig().name(), itr1.first);
   }
 }
 
@@ -1494,7 +1529,7 @@ VirtualHostImpl::virtualClusterFromEntries(const Http::HeaderMap& headers) const
 ConfigImpl::ConfigImpl(const envoy::config::route::v3::RouteConfiguration& config,
                        Server::Configuration::ServerFactoryContext& factory_context,
                        ProtobufMessage::ValidationVisitor& validator,
-                       bool validate_clusters_default)
+                       bool validate_clusters_default, const VirtualHostsMapPtr& old_vhosts_map)
     : name_(config.name()), symbol_table_(factory_context.scope().symbolTable()),
       uses_vhds_(config.has_vhds()),
       most_specific_header_mutations_wins_(config.most_specific_header_mutations_wins()),
@@ -1503,7 +1538,8 @@ ConfigImpl::ConfigImpl(const envoy::config::route::v3::RouteConfiguration& confi
                                           DEFAULT_MAX_DIRECT_RESPONSE_BODY_SIZE_BYTES)) {
   route_matcher_ = std::make_unique<RouteMatcher>(
       config, *this, factory_context, validator,
-      PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, validate_clusters, validate_clusters_default));
+      PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, validate_clusters, validate_clusters_default),
+      std::move(old_vhosts_map));
 
   for (const std::string& header : config.internal_only_headers()) {
     internal_only_headers_.push_back(Http::LowerCaseString(header));

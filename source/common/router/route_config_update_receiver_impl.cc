@@ -52,9 +52,12 @@ bool RouteConfigUpdateReceiverImpl::onVhdsUpdate(
   rebuildRouteConfig(rds_virtual_hosts_, *vhosts_after_this_update,
                      *route_config_after_this_update);
 
+  const auto old_config = std::static_pointer_cast<const ConfigImpl>(config_);
+  const VirtualHostsMapPtr& old_vhosts_map = old_config->getVirtualHostsOld();
   auto new_config = std::make_shared<ConfigImpl>(
       *route_config_after_this_update, factory_context_,
-      factory_context_.messageValidationContext().dynamicValidationVisitor(), false);
+      factory_context_.messageValidationContext().dynamicValidationVisitor(), false,
+      std::move(old_vhosts_map));
 
   // No exception, route_config_after_this_update is valid, can update the state.
   vhds_virtual_hosts_ = std::move(vhosts_after_this_update);
