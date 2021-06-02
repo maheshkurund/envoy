@@ -193,7 +193,7 @@ public:
     return hedge_policy_;
   }
   uint32_t retryShadowBufferLimit() const override { return retry_shadow_buffer_limit_; }
-  const envoy::config::route::v3::VirtualHost& getVirtualHostConfig() const {
+  envoy::config::route::v3::VirtualHost getVirtualHostConfig() const {
     return virtual_host_config_;
   }
 
@@ -255,7 +255,7 @@ private:
   absl::optional<envoy::config::route::v3::RetryPolicy> retry_policy_;
   absl::optional<envoy::config::route::v3::HedgePolicy> hedge_policy_;
   const CatchAllVirtualCluster virtual_cluster_catch_all_;
-  const envoy::config::route::v3::VirtualHost& virtual_host_config_;
+  envoy::config::route::v3::VirtualHost virtual_host_config_;
 };
 
 using VirtualHostSharedPtr = std::shared_ptr<VirtualHostImpl>;
