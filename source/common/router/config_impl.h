@@ -30,7 +30,7 @@
 #include "source/common/router/router_ratelimit.h"
 #include "source/common/router/tls_context_match_criteria_impl.h"
 #include "source/common/stats/symbol_table_impl.h"
-
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/node_hash_map.h"
 #include "absl/types/optional.h"
 
@@ -188,7 +188,7 @@ class VirtualHostImpl : public VirtualHost {
 public:
   VirtualHostImpl(
       const envoy::config::route::v3::VirtualHost& virtual_host,
-      const OptionalHttpFilters& optional_http_filters, const ConfigImpl& global_route_config,
+      const OptionalHttpFilters& optional_http_filters, ConfigImpl* global_route_config,
       Server::Configuration::ServerFactoryContext& factory_context, Stats::Scope& scope,
       ProtobufMessage::ValidationVisitor& validator,
       const absl::optional<Upstream::ClusterManager::ClusterInfoMaps>& validation_clusters);
@@ -198,7 +198,8 @@ public:
                                           const StreamInfo::StreamInfo& stream_info,
                                           uint64_t random_value) const;
   const VirtualCluster* virtualClusterFromEntries(const Http::HeaderMap& headers) const;
-  const ConfigImpl& globalRouteConfig() const { return global_route_config_; }
+  ConfigImpl* globalRouteConfig() const { return global_route_config_; }
+  void setGlobalRouteConfig(ConfigImpl* global_router_config) { global_route_config_ = global_router_config; }
   const HeaderParser& requestHeaderParser() const { return *request_headers_parser_; }
   const HeaderParser& responseHeaderParser() const { return *response_headers_parser_; }
 
@@ -265,7 +266,7 @@ private:
   SslRequirements ssl_requirements_;
   const RateLimitPolicyImpl rate_limit_policy_;
   std::unique_ptr<const CorsPolicyImpl> cors_policy_;
-  const ConfigImpl& global_route_config_; // See note in RouteEntryImplBase::clusterEntry() on why
+  ConfigImpl* global_route_config_; // See note in RouteEntryImplBase::clusterEntry() on why
                                           // raw ref to the top level config is currently safe.
   HeaderParserPtr request_headers_parser_;
   HeaderParserPtr response_headers_parser_;
@@ -1011,22 +1012,26 @@ public:
 
   bool supportsPathlessHeaders() const override { return true; }
 };
+using VirtualHostsMapPtr = std::shared_ptr<absl::flat_hash_map<std::string, VirtualHostSharedPtr>>;
 /**
  * Wraps the route configuration which matches an incoming request headers to a backend cluster.
  * This is split out mainly to help with unit testing.
  */
-class RouteMatcher {
+class RouteMatcher : Logger::Loggable<Logger::Id::router> {
 public:
   RouteMatcher(const envoy::config::route::v3::RouteConfiguration& config,
                const OptionalHttpFilters& optional_http_filters,
-               const ConfigImpl& global_http_config,
+               ConfigImpl* global_http_config,
                Server::Configuration::ServerFactoryContext& factory_context,
-               ProtobufMessage::ValidationVisitor& validator, bool validate_clusters);
+               ProtobufMessage::ValidationVisitor& validator, bool validate_clusters,
+               const VirtualHostsMapPtr& old_vhosts_map,
+               const absl::flat_hash_set<std::string>& updated_vhost_names);
 
   RouteConstSharedPtr route(const RouteCallback& cb, const Http::RequestHeaderMap& headers,
                             const StreamInfo::StreamInfo& stream_info, uint64_t random_value) const;
 
   const VirtualHostImpl* findVirtualHost(const Http::RequestHeaderMap& headers) const;
+  const VirtualHostsMapPtr& getAllVirtualHosts() const { return all_virtual_hosts_; }
 
 private:
   using WildcardVirtualHosts =
@@ -1051,6 +1056,8 @@ private:
   WildcardVirtualHosts wildcard_virtual_host_prefixes_;
 
   VirtualHostSharedPtr default_virtual_host_;
+  // map of vh_name, vhostimpl
+  VirtualHostsMapPtr all_virtual_hosts_;
 };
 
 /**
@@ -1061,7 +1068,10 @@ public:
   ConfigImpl(const envoy::config::route::v3::RouteConfiguration& config,
              const OptionalHttpFilters& optional_http_filters,
              Server::Configuration::ServerFactoryContext& factory_context,
-             ProtobufMessage::ValidationVisitor& validator, bool validate_clusters_default);
+             ProtobufMessage::ValidationVisitor& validator, bool validate_clusters_default,
+             const VirtualHostsMapPtr& old_vhosts_map=std::make_shared<
+                  absl::flat_hash_map<std::string, VirtualHostSharedPtr>>(),
+             const absl::flat_hash_set<std::string>& updated_vhost_names=absl::flat_hash_set<std::string>());
 
   const HeaderParser& requestHeaderParser() const { return *request_headers_parser_; };
   const HeaderParser& responseHeaderParser() const { return *response_headers_parser_; };
@@ -1097,6 +1107,9 @@ public:
     return max_direct_response_body_size_bytes_;
   }
 
+  const VirtualHostsMapPtr& getVirtualHostsOld() const {
+    return route_matcher_->getAllVirtualHosts();
+  }
 private:
   std::unique_ptr<RouteMatcher> route_matcher_;
   std::list<Http::LowerCaseString> internal_only_headers_;

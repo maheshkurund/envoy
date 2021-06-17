@@ -31,7 +31,8 @@ public:
   bool removeVhosts(std::map<std::string, envoy::config::route::v3::VirtualHost>& vhosts,
                     const Protobuf::RepeatedPtrField<std::string>& removed_vhost_names);
   bool updateVhosts(std::map<std::string, envoy::config::route::v3::VirtualHost>& vhosts,
-                    const VirtualHostRefVector& added_vhosts);
+                    const VirtualHostRefVector& added_vhosts,
+                    absl::flat_hash_set<std::string>& updated_vhost_names);
   void rebuildRouteConfig(
       const std::map<std::string, envoy::config::route::v3::VirtualHost>& rds_vhosts,
       const std::map<std::string, envoy::config::route::v3::VirtualHost>& vhds_vhosts,

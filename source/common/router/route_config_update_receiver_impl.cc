@@ -41,11 +41,13 @@ bool RouteConfigUpdateReceiverImpl::onVhdsUpdate(
     const Protobuf::RepeatedPtrField<std::string>& removed_resources,
     const std::string& version_info) {
 
+  auto updated_vhost_names = absl::flat_hash_set<std::string>();
+
   auto vhosts_after_this_update =
       std::make_unique<std::map<std::string, envoy::config::route::v3::VirtualHost>>(
           *vhds_virtual_hosts_);
   const bool removed = removeVhosts(*vhosts_after_this_update, removed_resources);
-  const bool updated = updateVhosts(*vhosts_after_this_update, added_vhosts);
+  const bool updated = updateVhosts(*vhosts_after_this_update, added_vhosts, updated_vhost_names);
 
   auto route_config_after_this_update =
       std::make_unique<envoy::config::route::v3::RouteConfiguration>();
@@ -53,9 +55,12 @@ bool RouteConfigUpdateReceiverImpl::onVhdsUpdate(
   rebuildRouteConfig(rds_virtual_hosts_, *vhosts_after_this_update,
                      *route_config_after_this_update);
 
+  const auto old_config = std::static_pointer_cast<const ConfigImpl>(config_);
+  const VirtualHostsMapPtr& old_vhosts_map = old_config->getVirtualHostsOld();
   auto new_config = std::make_shared<ConfigImpl>(
       *route_config_after_this_update, optional_http_filters_, factory_context_,
-      factory_context_.messageValidationContext().dynamicValidationVisitor(), false);
+      factory_context_.messageValidationContext().dynamicValidationVisitor(), false,
+      std::move(old_vhosts_map), updated_vhost_names);
 
   // No exception, route_config_after_this_update is valid, can update the state.
   vhds_virtual_hosts_ = std::move(vhosts_after_this_update);
@@ -97,7 +102,8 @@ bool RouteConfigUpdateReceiverImpl::removeVhosts(
 
 bool RouteConfigUpdateReceiverImpl::updateVhosts(
     std::map<std::string, envoy::config::route::v3::VirtualHost>& vhosts,
-    const VirtualHostRefVector& added_vhosts) {
+    const VirtualHostRefVector& added_vhosts,
+    absl::flat_hash_set<std::string>& updated_vhost_names) {
   bool vhosts_added = false;
   for (const auto& vhost : added_vhosts) {
     auto found = vhosts.find(vhost.get().name());
@@ -106,6 +112,7 @@ bool RouteConfigUpdateReceiverImpl::updateVhosts(
     }
     vhosts.emplace(vhost.get().name(), vhost.get());
     vhosts_added = true;
+    updated_vhost_names.emplace(vhost.get().name());
   }
   return vhosts_added;
 }

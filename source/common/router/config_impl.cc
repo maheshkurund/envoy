@@ -362,7 +362,7 @@ RouteEntryImplBase::RouteEntryImplBase(const VirtualHostImpl& vhost,
       direct_response_code_(ConfigUtility::parseDirectResponseCode(route)),
       direct_response_body_(ConfigUtility::parseDirectResponseBody(
           route, factory_context.api(),
-          vhost_.globalRouteConfig().maxDirectResponseBodySizeBytes())),
+          vhost_.globalRouteConfig()->maxDirectResponseBodySizeBytes())),
       per_filter_configs_(route.typed_per_filter_config(),
                           route.hidden_envoy_deprecated_per_filter_config(), optional_http_filters,
                           factory_context, validator),
@@ -548,15 +548,15 @@ const std::string& RouteEntryImplBase::clusterName() const { return cluster_name
 void RouteEntryImplBase::finalizeRequestHeaders(Http::RequestHeaderMap& headers,
                                                 const StreamInfo::StreamInfo& stream_info,
                                                 bool insert_envoy_original_path) const {
-  if (!vhost_.globalRouteConfig().mostSpecificHeaderMutationsWins()) {
+  if (!vhost_.globalRouteConfig()->mostSpecificHeaderMutationsWins()) {
     // Append user-specified request headers from most to least specific: route-level headers,
     // virtual host level headers and finally global connection manager level headers.
     request_headers_parser_->evaluateHeaders(headers, stream_info);
     vhost_.requestHeaderParser().evaluateHeaders(headers, stream_info);
-    vhost_.globalRouteConfig().requestHeaderParser().evaluateHeaders(headers, stream_info);
+    vhost_.globalRouteConfig()->requestHeaderParser().evaluateHeaders(headers, stream_info);
   } else {
     // Most specific mutations take precedence.
-    vhost_.globalRouteConfig().requestHeaderParser().evaluateHeaders(headers, stream_info);
+    vhost_.globalRouteConfig()->requestHeaderParser().evaluateHeaders(headers, stream_info);
     vhost_.requestHeaderParser().evaluateHeaders(headers, stream_info);
     request_headers_parser_->evaluateHeaders(headers, stream_info);
   }
@@ -599,15 +599,15 @@ void RouteEntryImplBase::finalizeRequestHeaders(Http::RequestHeaderMap& headers,
 
 void RouteEntryImplBase::finalizeResponseHeaders(Http::ResponseHeaderMap& headers,
                                                  const StreamInfo::StreamInfo& stream_info) const {
-  if (!vhost_.globalRouteConfig().mostSpecificHeaderMutationsWins()) {
+  if (!vhost_.globalRouteConfig()->mostSpecificHeaderMutationsWins()) {
     // Append user-specified request headers from most to least specific: route-level headers,
     // virtual host level headers and finally global connection manager level headers.
     response_headers_parser_->evaluateHeaders(headers, stream_info);
     vhost_.responseHeaderParser().evaluateHeaders(headers, stream_info);
-    vhost_.globalRouteConfig().responseHeaderParser().evaluateHeaders(headers, stream_info);
+    vhost_.globalRouteConfig()->responseHeaderParser().evaluateHeaders(headers, stream_info);
   } else {
     // Most specific mutations take precedence.
-    vhost_.globalRouteConfig().responseHeaderParser().evaluateHeaders(headers, stream_info);
+    vhost_.globalRouteConfig()->responseHeaderParser().evaluateHeaders(headers, stream_info);
     vhost_.responseHeaderParser().evaluateHeaders(headers, stream_info);
     response_headers_parser_->evaluateHeaders(headers, stream_info);
   }
@@ -617,7 +617,7 @@ Http::HeaderTransforms
 RouteEntryImplBase::responseHeaderTransforms(const StreamInfo::StreamInfo& stream_info,
                                              bool do_formatting) const {
   Http::HeaderTransforms transforms;
-  if (!vhost_.globalRouteConfig().mostSpecificHeaderMutationsWins()) {
+  if (!vhost_.globalRouteConfig()->mostSpecificHeaderMutationsWins()) {
     // Append user-specified request headers from most to least specific: route-level headers,
     // virtual host level headers and finally global connection manager level headers.
     mergeTransforms(transforms,
@@ -625,13 +625,13 @@ RouteEntryImplBase::responseHeaderTransforms(const StreamInfo::StreamInfo& strea
     mergeTransforms(transforms,
                     vhost_.responseHeaderParser().getHeaderTransforms(stream_info, do_formatting));
     mergeTransforms(transforms,
-                    vhost_.globalRouteConfig().responseHeaderParser().getHeaderTransforms(
+                    vhost_.globalRouteConfig()->responseHeaderParser().getHeaderTransforms(
                         stream_info, do_formatting));
   } else {
     // Most specific mutations (route-level) take precedence by being applied
     // last: if a header is specified at all levels, the last one applied wins.
     mergeTransforms(transforms,
-                    vhost_.globalRouteConfig().responseHeaderParser().getHeaderTransforms(
+                    vhost_.globalRouteConfig()->responseHeaderParser().getHeaderTransforms(
                         stream_info, do_formatting));
     mergeTransforms(transforms,
                     vhost_.responseHeaderParser().getHeaderTransforms(stream_info, do_formatting));
@@ -1180,7 +1180,7 @@ RouteConstSharedPtr ConnectRouteEntryImpl::matches(const Http::RequestHeaderMap&
 
 VirtualHostImpl::VirtualHostImpl(
     const envoy::config::route::v3::VirtualHost& virtual_host,
-    const OptionalHttpFilters& optional_http_filters, const ConfigImpl& global_route_config,
+    const OptionalHttpFilters& optional_http_filters, ConfigImpl* global_route_config,
     Server::Configuration::ServerFactoryContext& factory_context, Stats::Scope& scope,
     ProtobufMessage::ValidationVisitor& validator,
     const absl::optional<Upstream::ClusterManager::ClusterInfoMaps>& validation_clusters)
@@ -1290,7 +1290,7 @@ VirtualHostImpl::VirtualClusterEntry::VirtualClusterEntry(
   headers_ = Http::HeaderUtility::buildHeaderDataVector(virtual_cluster.headers());
 }
 
-const Config& VirtualHostImpl::routeConfig() const { return global_route_config_; }
+const Config& VirtualHostImpl::routeConfig() const { return *global_route_config_; }
 
 const RouteSpecificFilterConfig* VirtualHostImpl::perFilterConfig(const std::string& name) const {
   return per_filter_configs_.get(name);
@@ -1320,19 +1320,37 @@ const VirtualHostImpl* RouteMatcher::findWildcardVirtualHost(
 
 RouteMatcher::RouteMatcher(const envoy::config::route::v3::RouteConfiguration& route_config,
                            const OptionalHttpFilters& optional_http_filters,
-                           const ConfigImpl& global_route_config,
+                           ConfigImpl* global_route_config,
                            Server::Configuration::ServerFactoryContext& factory_context,
-                           ProtobufMessage::ValidationVisitor& validator, bool validate_clusters)
+                           ProtobufMessage::ValidationVisitor& validator, bool validate_clusters,
+                           const VirtualHostsMapPtr& old_vhosts_map,
+                           const absl::flat_hash_set<std::string>& updated_vhost_names)
     : vhost_scope_(factory_context.scope().scopeFromStatName(
           factory_context.routerContext().virtualClusterStatNames().vhost_)) {
+  all_virtual_hosts_ = std::make_shared<absl::flat_hash_map<std::string, VirtualHostSharedPtr>>();
   absl::optional<Upstream::ClusterManager::ClusterInfoMaps> validation_clusters;
   if (validate_clusters) {
     validation_clusters = factory_context.clusterManager().clusters();
   }
   for (const auto& virtual_host_config : route_config.virtual_hosts()) {
-    VirtualHostSharedPtr virtual_host(
-        new VirtualHostImpl(virtual_host_config, optional_http_filters, global_route_config,
-                            factory_context, *vhost_scope_, validator, validation_clusters));
+    VirtualHostSharedPtr virtual_host;
+    if (!old_vhosts_map->empty()) {
+      const auto& old_vhost_itr = old_vhosts_map->find(virtual_host_config.name());
+      if (old_vhost_itr != old_vhosts_map->end()) {
+        // vhost present in old config, check if its present in new update.
+        const auto& new_vhost_itr = updated_vhost_names.find(virtual_host_config.name());
+        if (new_vhost_itr == updated_vhost_names.end()) {
+          // use old vhost as its not updated.
+          virtual_host = old_vhost_itr->second;
+          virtual_host->setGlobalRouteConfig(global_route_config);
+        }
+      }
+    }
+    if (!virtual_host) {
+      virtual_host = std::make_shared<VirtualHostImpl>(virtual_host_config, optional_http_filters, global_route_config,
+                            factory_context, *vhost_scope_, validator, validation_clusters);
+    }
+    all_virtual_hosts_->emplace(virtual_host_config.name(), virtual_host);
     for (const std::string& domain_name : virtual_host_config.domains()) {
       const std::string domain = Http::LowerCaseString(domain_name).get();
       bool duplicate_found = false;
@@ -1489,7 +1507,8 @@ ConfigImpl::ConfigImpl(const envoy::config::route::v3::RouteConfiguration& confi
                        const OptionalHttpFilters& optional_http_filters,
                        Server::Configuration::ServerFactoryContext& factory_context,
                        ProtobufMessage::ValidationVisitor& validator,
-                       bool validate_clusters_default)
+                       bool validate_clusters_default, const VirtualHostsMapPtr& old_vhosts_map,
+                       const absl::flat_hash_set<std::string>& updated_vhost_names)
     : name_(config.name()), symbol_table_(factory_context.scope().symbolTable()),
       uses_vhds_(config.has_vhds()),
       most_specific_header_mutations_wins_(config.most_specific_header_mutations_wins()),
@@ -1497,8 +1516,9 @@ ConfigImpl::ConfigImpl(const envoy::config::route::v3::RouteConfiguration& confi
           PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, max_direct_response_body_size_bytes,
                                           DEFAULT_MAX_DIRECT_RESPONSE_BODY_SIZE_BYTES)) {
   route_matcher_ = std::make_unique<RouteMatcher>(
-      config, optional_http_filters, *this, factory_context, validator,
-      PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, validate_clusters, validate_clusters_default));
+      config, optional_http_filters, this, factory_context, validator,
+      PROTOBUF_GET_WRAPPED_OR_DEFAULT(config, validate_clusters, validate_clusters_default),
+      std::move(old_vhosts_map), updated_vhost_names);
 
   for (const std::string& header : config.internal_only_headers()) {
     internal_only_headers_.push_back(Http::LowerCaseString(header));
